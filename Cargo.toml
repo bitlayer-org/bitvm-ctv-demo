@@ -1,0 +1,21 @@
+[package]
+name = "bitvm-ctv-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitcoin = { version = "0.31.1", features = ["serde"] }
+secp256k1 = { version = "0.28.2", features = ["rand", "hashes", "serde", "global-context"] }
+serde = { version = "1.0.197", features = ["derive"] }
+sha2 = "0.10.8"
+thiserror = "1.0.57"
+bitcoincore-rpc = "0.19.0"
+local-ip-address = "0.4"
+lazy_static = { version = "1.4.0", default-features = false, features = [
+    "spin_no_std",
+] }
+ctvlib = { git = "https://github.com/ursuscamp/ctvlib"}
+
+[dev-dependencies]
+hex = "0.4.3"
+serde_json = "1.0.114"
