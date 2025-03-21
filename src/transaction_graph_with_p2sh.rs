@@ -92,7 +92,7 @@ impl TransactionGraph {
  
         let mut happy_take = create_btc_tx(
             &vec![dummy_utxo(), p2sh_trick_utxo],
-            vec![(happy_take_output.script_pubkey.clone(), happy_take_output.value / 2), (happy_take_output.script_pubkey, happy_take_output.value - happy_take_output.value / 2)],
+            vec![(happy_take_output.script_pubkey.clone(), params.gas_amt), (happy_take_output.script_pubkey, happy_take_output.value - params.gas_amt)],
         );
  
         let unlocking_script = Self::get_p2sh_tx_signature(&happy_take, &temp_key, 1, EcdsaSighashType::SinglePlusAnyoneCanPay);
