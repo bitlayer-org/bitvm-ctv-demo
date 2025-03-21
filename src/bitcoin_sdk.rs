@@ -8,6 +8,8 @@ use bitcoincore_rpc::{
     Client, Result, RpcApi,
 };
 
+
+#[derive(Clone)]
 pub struct UTXO {
     pub outpoint: OutPoint,
     pub amount: Amount,

@@ -6,3 +6,5 @@ step2: Start Bitcoin using the script: `scripts/start_btc_local_testnet.sh`. Ens
 step3: Run `cargo run` in the project root directory.
 
 a write-up about this demo: https://hackmd.io/@MarkYnx/Sk6mmVrsJl
+
+wip: OP_CTV with P2SH trick test: cargo test --package bitvm-ctv-demo --bin bitvm-ctv-demo -- transaction_graph_with_p2sh::test::test_transaction_graph --exact --show-output 

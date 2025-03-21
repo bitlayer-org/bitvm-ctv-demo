@@ -1,10 +1,13 @@
 use bitcoin::{Network, OutPoint};
 use bitcoin_sdk::{RPCClient, UTXO};
+use common::{Params, Pegin, SignerInfo};
 use local_ip_address::local_ip;
-use transaction_graph::{Params, Pegin, SignerInfo, TransactionGraph};
+use transaction_graph::TransactionGraph;
 
 pub mod bitcoin_sdk;
 pub mod transaction_graph;
+pub mod transaction_graph_with_p2sh;
+pub mod common;
 fn main() {
     // happy path: pegin -> kickoff -> happytake
     println!("=======happy path: pegin -> kickoff -> happytake=========================");
