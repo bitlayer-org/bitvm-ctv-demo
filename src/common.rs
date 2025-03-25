@@ -17,6 +17,9 @@ pub struct Params {
     pub depoist_amt: Amount,
     pub stake_amt: Amount,
     pub gas_amt: Amount,
+    pub dust_amt: Amount,
+    pub reward_amt: Amount,
+    pub crowd_amt: Amount,
 }
 
 impl Default for Params {
@@ -25,6 +28,9 @@ impl Default for Params {
             depoist_amt: Amount::from_btc(2.0).expect(""),
             stake_amt: Amount::from_btc(1.0).expect(""),
             gas_amt: Amount::from_sat(1500),
+            dust_amt: Amount::from_sat(556),
+            reward_amt: Amount::from_btc(0.5).expect(""),
+            crowd_amt: Amount::from_btc(1.0).expect("")
         }
     }
 }
@@ -79,6 +85,11 @@ pub fn build_taptree_with_script(
     })
 }
 
+pub fn generate_p2a_script() -> ScriptBuf {
+    ScriptBuf::from_hex("51024e73")
+                    .expect("statically valid script")
+}
+
 pub struct P2SHKeypair {
     secp: Secp256k1<All>,
     secret_key: SecretKey,
@@ -103,7 +114,6 @@ impl P2SHKeypair {
             .push_slice(convert_from(public.to_bytes()))
             .push_opcode(OP_CHECKSIG)
             .into_script();
-        println!("scritp: {}", script);
         let p2wsh_address = Address::p2wsh(&script, network);
         let p2sh_address = Address::p2sh(&script, network).expect("find");
 
@@ -252,7 +262,7 @@ impl Pegin {
     }
 }
 
-pub fn dummy_utxo() -> UTXO {
+pub fn dummy_utxo(amount: Amount) -> UTXO {
     UTXO {
         outpoint: OutPoint {
             txid: Txid::from_str(
@@ -261,13 +271,13 @@ pub fn dummy_utxo() -> UTXO {
             .expect(""),
             vout: 0,
         },
-        amount: Amount::ZERO,
+        amount,
     }
 }
 
 pub fn dummy_input() -> TxIn {
     TxIn {
-        previous_output: dummy_utxo().outpoint,
+        previous_output: dummy_utxo(Amount::ZERO).outpoint,
         sequence: bitcoin::Sequence(0xFFFFFFFF),
         script_sig: Builder::new().into_script(),
         witness: Witness::new(),

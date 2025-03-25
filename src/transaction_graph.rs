@@ -1,3 +1,4 @@
+use bitcoincore_rpc::bitcoin::key::constants::ZERO;
 use ctvlib::{TemplateHash, Error};
 use lazy_static::lazy_static;
 use std::str::FromStr;
@@ -18,7 +19,7 @@ use bitcoin::{Network, OutPoint, TxIn, Txid, Witness};
 use secp256k1::{rand, SECP256K1};
 
 use crate::bitcoin_sdk::UTXO;
-use crate::common::{build_taptree_with_script, calc_locking_script, create_btc_tx, dummy_input, dummy_utxo, Params, SignerInfo, TaprootInfo};
+use crate::common::{build_taptree_with_script, calc_locking_script, create_btc_tx, dummy_input, dummy_utxo, generate_p2a_script, Params, SignerInfo, TaprootInfo};
 
 pub struct TransactionGraph {
     kickoff: Transaction,
@@ -50,7 +51,7 @@ impl TransactionGraph {
                 - params.gas_amt, // for pegin, kickoff, happytake
             script_pubkey: operator.script_pubkey(),
         };
-        let happy_take = create_btc_tx(&vec![dummy_utxo()], vec![(happy_take_output.script_pubkey, happy_take_output.value)]);
+        let happy_take = create_btc_tx(&vec![dummy_utxo(Amount::ZERO)], vec![(happy_take_output.script_pubkey, happy_take_output.value)]);
 
         let happy_take_ctv_hash = happy_take.template_hash(0).expect("calc ctv hash");
         let lock_script_for_happy_take_input0 =
@@ -59,10 +60,9 @@ impl TransactionGraph {
         let disprove = {
             let value = params.depoist_amt.to_sat() + params.stake_amt.to_sat()
                 - params.gas_amt.to_sat() * 5; // for pegin, kickoff, challenge, assert, disprove
-            let ins = vec![dummy_utxo()];
+            let ins = vec![dummy_utxo(Amount::ZERO)];
             // p2a, you can find here: https://bitcoinops.org/en/bitcoin-core-28-wallet-integration-guide/
-            let anchor_script_pubkey = ScriptBuf::from_hex("51024e73")
-                    .expect("statically valid script");
+            let anchor_script_pubkey = generate_p2a_script();
             // why we split this into two outputs is because if the tx is only one output, the size of tx is not big enough to be accepted by node
             let outs = vec![(anchor_script_pubkey.clone(), Amount::from_sat(value/2)), (anchor_script_pubkey, Amount::from_sat(value-value/2))];
             create_btc_tx(&ins, outs)
@@ -71,7 +71,7 @@ impl TransactionGraph {
         let assert = {
             let value = params.depoist_amt.to_sat() + params.stake_amt.to_sat()
                 - params.gas_amt.to_sat() * 4; // for pegin, kickoff, challenge, assert, 
-            let ins = vec![dummy_utxo()];
+            let ins = vec![dummy_utxo(Amount::ZERO)];
             let disprove_ctv_hash = disprove.template_hash(0).expect("calc ctv hash");
             let lock_script =
                 calc_locking_script(disprove_ctv_hash).expect("calc lock script");
@@ -82,7 +82,7 @@ impl TransactionGraph {
         let challenge = {
             let value = params.depoist_amt.to_sat() + params.stake_amt.to_sat()
                 - params.gas_amt.to_sat() * 3;
-            let ins = vec![dummy_utxo()];
+            let ins = vec![dummy_utxo(Amount::ZERO)];
             let assert_ctv_hash = assert.template_hash(0).expect("calc ctv hash");
             let lock_script = calc_locking_script(assert_ctv_hash).expect("calc lock script");
             let outs = vec![(lock_script, Amount::from_sat(value))];
