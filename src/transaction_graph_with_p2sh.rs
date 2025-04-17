@@ -163,7 +163,10 @@ impl TransactionGraph {
         let mut kickoff_outputs = vec![
             (temp_key.p2sh_address.script_pubkey(), params.dust_amt),
             (temp_key.p2sh_address.script_pubkey(), params.dust_amt),
-            (temp_key.p2sh_address.script_pubkey(), params.dust_amt + params.gas_amt),
+            (
+                temp_key.p2sh_address.script_pubkey(),
+                params.dust_amt + params.gas_amt,
+            ),
             // (connector_b.address.script_pubkey(), params.dust_amt),
             // (connector_c.address.script_pubkey(), params.dust_amt),
         ];
@@ -253,21 +256,34 @@ impl TransactionGraph {
                 txid: assert.txid(),
                 vout: 1,
             },
-            amount: assert.output[1].value
+            amount: assert.output[1].value,
         };
-        let mut disprove = Self::create_slash_tx(disprove_p2sh_input, stake_utxo.amount - params.gas_amt, &burn_signer.address, params);
-        let disprove_script_sig =
-            Self::get_p2sh_tx_signature(&disprove, &temp_key, 0, EcdsaSighashType::SinglePlusAnyoneCanPay);
+        let mut disprove = Self::create_slash_tx(
+            disprove_p2sh_input,
+            stake_utxo.amount - params.gas_amt,
+            &burn_signer.address,
+            params,
+        );
+        let disprove_script_sig = Self::get_p2sh_tx_signature(
+            &disprove,
+            &temp_key,
+            0,
+            EcdsaSighashType::SinglePlusAnyoneCanPay,
+        );
 
         disprove.input[0].script_sig = disprove_script_sig;
 
         let time = {
-            let locking_script = calc_locking_script(disprove.template_hash(1).expect("msg")).expect("msg");
-            create_btc_tx(&vec![stake_utxo.clone()], vec![(locking_script, stake_utxo.amount - params.gas_amt)])
+            let locking_script =
+                calc_locking_script(disprove.template_hash(1).expect("msg")).expect("msg");
+            create_btc_tx(
+                &vec![stake_utxo.clone()],
+                vec![(locking_script, stake_utxo.amount - params.gas_amt)],
+            )
         };
         disprove.input[1].previous_output = OutPoint {
             txid: time.txid(),
-            vout: 0
+            vout: 0,
         };
 
         let connector_a = {
@@ -313,7 +329,12 @@ impl TransactionGraph {
     ) -> Witness {
         let mut sighash_cache = SighashCache::new(transaction);
         let sighash = sighash_cache
-            .p2wpkh_signature_hash(input_idx, &signer.address.script_pubkey(), target_amt, sighash_type)
+            .p2wpkh_signature_hash(
+                input_idx,
+                &signer.address.script_pubkey(),
+                target_amt,
+                sighash_type,
+            )
             .unwrap();
 
         let signature = signer.sign_ecdsa(sighash, bitcoin::sighash::EcdsaSighashType::All);
@@ -407,7 +428,8 @@ impl TransactionGraph {
 
     pub fn get_time_tx(&self, signer_info: &SignerInfo, target_amt: Amount) -> Transaction {
         let mut tx = self.time.clone();
-        let witness = Self::calc_p2wpkh_witness(target_amt, &tx, 0, signer_info, EcdsaSighashType::All);
+        let witness =
+            Self::calc_p2wpkh_witness(target_amt, &tx, 0, signer_info, EcdsaSighashType::All);
         tx.input[0].witness = witness;
 
         tx
@@ -415,15 +437,30 @@ impl TransactionGraph {
 }
 
 mod test {
+    use std::{fs::create_dir, os::unix::net};
+
     use bitcoin::{
-        consensus::serde::hex::Upper, hex::DisplayHex, opcodes::OP_0, script::Builder,
-        sighash::SighashCache, OutPoint, Witness,
+        consensus::serde::hex::Upper,
+        hex::DisplayHex,
+        key,
+        opcodes::{
+            all::{OP_2DROP, OP_CHECKSIG},
+            OP_0, OP_TRUE,
+        },
+        script::Builder,
+        sighash::SighashCache,
+        Address, Amount, EcdsaSighashType, Network, OutPoint, PrivateKey, Witness,
     };
+    use ctvlib::TemplateHash;
     use local_ip_address::local_ip;
+    use secp256k1::Secp256k1;
 
     use crate::{
         bitcoin_sdk::{RPCClient, UTXO},
-        common::{convert_from, create_btc_tx, P2SHKeypair, Params, Pegin, SignerInfo},
+        common::{
+            calc_locking_script, convert_from, create_btc_tx, dummy_utxo, P2SHKeypair, Params,
+            Pegin, SignerInfo,
+        },
         transaction_graph_with_p2sh::TransactionGraph,
     };
 
@@ -445,7 +482,8 @@ mod test {
                 &operator_siggner.address,
             );
 
-            let stake_utxo = client.prepare_utxo_for_address(params.stake_amt, &operator_siggner.address);
+            let stake_utxo =
+                client.prepare_utxo_for_address(params.stake_amt, &operator_siggner.address);
 
             let transaction_graph =
                 TransactionGraph::new(&operator_siggner.address, &params, kickoff_utxo, stake_utxo);
@@ -482,11 +520,12 @@ mod test {
             let client = RPCClient::new(&url, &user, &password);
 
             let kickoff_utxo = client.prepare_utxo_for_address(
-                params.dust_amt * 3 + params.gas_amt * 2 /* kickoff, assert */,
+                params.dust_amt * 3 + params.gas_amt * 2, /* kickoff, assert */
                 &operator_siggner.address,
             );
 
-            let stake_utxo = client.prepare_utxo_for_address(params.stake_amt, &operator_siggner.address);
+            let stake_utxo =
+                client.prepare_utxo_for_address(params.stake_amt, &operator_siggner.address);
             let transaction_graph =
                 TransactionGraph::new(&operator_siggner.address, &params, kickoff_utxo, stake_utxo);
             let first_script = transaction_graph.get_first_script();
@@ -540,13 +579,18 @@ mod test {
             let client = RPCClient::new(&url, &user, &password);
 
             let kickoff_utxo = client.prepare_utxo_for_address(
-                params.dust_amt * 3 + params.gas_amt * 2 /* kickoff, assert */,
+                params.dust_amt * 3 + params.gas_amt * 2, /* kickoff, assert */
                 &operator_siggner.address,
             );
 
-            let stake_utxo = client.prepare_utxo_for_address(params.stake_amt, &operator_siggner.address);
-            let transaction_graph =
-                TransactionGraph::new(&operator_siggner.address, &params, kickoff_utxo, stake_utxo.clone());
+            let stake_utxo =
+                client.prepare_utxo_for_address(params.stake_amt, &operator_siggner.address);
+            let transaction_graph = TransactionGraph::new(
+                &operator_siggner.address,
+                &params,
+                kickoff_utxo,
+                stake_utxo.clone(),
+            );
             let first_script = transaction_graph.get_first_script();
             let utxo =
                 client.prepare_utxo_for_address(params.depoist_amt, &operator_siggner.address);
@@ -722,5 +766,100 @@ mod test {
         happy_take.input[0].witness = unlocking_script;
         let happy_take_txid = client.send_transaction(&happy_take).expect("");
         println!("happy take txid: {}", happy_take_txid);
+    }
+
+    #[test]
+    pub fn test_broken_case_of_p2sh() {
+        let network = Network::Regtest;
+        let params = Params::default();
+        let url = format!("{}:18443", local_ip().expect("find one").to_string());
+        let user = "admin".to_string();
+        let password = "admin".to_string();
+
+        let client = RPCClient::new(&url, &user, &password);
+
+        // refer to this case: https://delvingbitcoin.org/t/how-ctv-csfs-improves-bitvm-bridges/1591/8
+        let utxo_b_key = P2SHKeypair::new(network);
+        let utxo_b = client.prepare_utxo_for_address(params.depoist_amt, &utxo_b_key.p2sh_address);
+
+        let temp_signer = SignerInfo::new(network);
+        let temp_utxo = client.prepare_utxo_for_address(params.depoist_amt + params.depoist_amt, &temp_signer.address);
+        let utxo_c_script = Builder::new()
+            .push_opcode(OP_2DROP)
+            .push_opcode(OP_TRUE)
+            .into_script();
+        let mut utxo_c_tx = create_btc_tx(
+            &vec![temp_utxo.clone()],
+            vec![(utxo_c_script, params.depoist_amt - params.gas_amt), (temp_signer.address.script_pubkey(), params.depoist_amt)],
+        );
+        let witness = TransactionGraph::calc_p2wpkh_witness(
+            temp_utxo.amount,
+            &utxo_c_tx,
+            0,
+            &temp_signer,
+            EcdsaSighashType::All,
+        );
+        utxo_c_tx.input[0].witness = witness;
+        let utxo_c_txid = client.send_transaction(&utxo_c_tx).unwrap();
+        let utxo_c = UTXO {
+            outpoint: OutPoint {
+                txid: utxo_c_txid,
+                vout: 0,
+            },
+            amount: utxo_c_tx.output[0].value,
+        };
+
+        let ins = vec![dummy_utxo(Amount::ZERO), utxo_b.clone()];
+        let outs = vec![
+            (
+                utxo_b_key.p2wsh_address.script_pubkey(),
+                params.depoist_amt - params.gas_amt - params.gas_amt - params.gas_amt,
+            ),
+            (
+                utxo_b_key.p2wsh_address.script_pubkey(),
+                params.depoist_amt,
+            ),
+        ];
+        let mut temp_target_tx = create_btc_tx(&ins, outs);
+        let unlocking_script_sig = TransactionGraph::get_p2sh_tx_signature(
+            &temp_target_tx,
+            &utxo_b_key,
+            1,
+            EcdsaSighashType::SinglePlusAnyoneCanPay,
+        );
+        temp_target_tx.input[1].script_sig = unlocking_script_sig;
+        let ctv_hash = temp_target_tx.template_hash(0).unwrap();
+        let ctv_locking_script = calc_locking_script(ctv_hash).unwrap();
+
+        let temp_signer = SignerInfo::new(network);
+        let temp_utxo = client.prepare_utxo_for_address(params.depoist_amt, &temp_signer.address);
+
+        let mut utxo_a_tx = create_btc_tx(
+            &vec![temp_utxo.clone()],
+            vec![(ctv_locking_script, params.depoist_amt - params.gas_amt)],
+        );
+        let witness = TransactionGraph::calc_p2wpkh_witness(
+            temp_utxo.amount,
+            &utxo_a_tx,
+            0,
+            &temp_signer,
+            EcdsaSighashType::All,
+        );
+        utxo_a_tx.input[0].witness = witness;
+        let utxo_a_txid = client.send_transaction(&utxo_a_tx).unwrap();
+        let utxo_a = UTXO {
+            outpoint: OutPoint {
+                txid: utxo_a_txid,
+                vout: 0,
+            },
+            amount: utxo_a_tx.output[0].value,
+        };
+
+        // using utxo_a and utxo_c(it is expected to be utxo_b)
+        temp_target_tx.input[0].previous_output = utxo_a.outpoint;
+        temp_target_tx.input[1].previous_output = utxo_c.outpoint;
+
+        // it works! we can use utxo_c instead of utxo_b, but utxo_c is an non-standard tx.
+        client.send_transaction(&temp_target_tx).unwrap();
     }
 }

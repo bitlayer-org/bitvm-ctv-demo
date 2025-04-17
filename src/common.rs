@@ -189,6 +189,10 @@ impl SignerInfo {
         self.pk.to_bytes().clone()
     }
 
+    pub fn get_raw_pk(&self) -> PublicKey {
+        self.pk.clone()
+    }
+
     pub fn sign_ecdsa(&self, hash: SegwitV0Sighash, sign_type: EcdsaSighashType) -> Vec<u8> {
         let msg = Message::from_digest_slice(&hash[..]).expect("should be SegwitV0Sighash");
         let signature = self.secp.sign_ecdsa(&msg, &self.sk);
