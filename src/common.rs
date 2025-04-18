@@ -1,7 +1,7 @@
 use std::{ops::Add, str::FromStr};
 
 use bitcoin::{
-    hashes::{ripemd160, sha256, Hash}, key, opcodes::all::{OP_CHECKSIG, OP_NOP4}, script::{Builder, PushBytesBuf}, sighash::SighashCache, taproot::{TaprootBuilder, TaprootSpendInfo}, transaction::Version, Address, Amount, EcdsaSighashType, LegacySighash, Network, OutPoint, PrivateKey, PublicKey, Script, ScriptBuf, SegwitV0Sighash, Transaction, TxIn, TxOut, Txid, Witness, XOnlyPublicKey
+    hashes::{ripemd160, sha256, Hash}, key, opcodes::all::{OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_NOP4}, script::{Builder, PushBytesBuf}, sighash::SighashCache, taproot::{TaprootBuilder, TaprootSpendInfo}, transaction::Version, Address, Amount, EcdsaSighashType, LegacySighash, Network, OutPoint, PrivateKey, PublicKey, Script, ScriptBuf, SegwitV0Sighash, Transaction, TxIn, TxOut, Txid, Witness, XOnlyPublicKey
 };
 use ctvlib::Error;
 use lazy_static::lazy_static;
@@ -98,6 +98,7 @@ pub struct P2SHKeypair {
     pub script: ScriptBuf,
     pub p2wsh_address: Address,
     pub p2sh_address: Address,
+    pub network: Network,
 }
 impl P2SHKeypair {
     pub fn new(network: Network) -> P2SHKeypair {
@@ -112,8 +113,9 @@ impl P2SHKeypair {
             
         let script = Builder::new()
             .push_slice(convert_from(public.to_bytes()))
-            .push_opcode(OP_CHECKSIG)
+            .push_opcode(OP_CHECKSIGVERIFY)
             .into_script();
+
         let p2wsh_address = Address::p2wsh(&script, network);
         let p2sh_address = Address::p2sh(&script, network).expect("find");
 
@@ -124,7 +126,8 @@ impl P2SHKeypair {
             public,
             script,
             p2wsh_address,
-            p2sh_address
+            p2sh_address,
+            network
         };
     }
 

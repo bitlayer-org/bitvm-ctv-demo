@@ -1,4 +1,6 @@
+use bitcoin::consensus::serde::hex::Upper;
 use bitcoin::hex::DisplayHex;
+use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DUP};
 use bitcoincore_rpc::bitcoin::transaction;
 use ctvlib::{Error, TemplateHash};
 use lazy_static::lazy_static;
@@ -61,6 +63,36 @@ impl TransactionGraph {
 
         Builder::new()
             .push_slice(&convert_from(signature))
+            .push_slice(convert_from(p2sh_signer.script.clone().into()))
+            .into_script()
+    }
+
+    // refer to https://delvingbitcoin.org/t/how-ctv-csfs-improves-bitvm-bridges/1591/8
+    pub fn get_improved_p2sh_tx_signature(
+        tx: &Transaction,
+        p2sh_signer: &P2SHKeypair,
+        input_index: usize,
+        sighash_type: EcdsaSighashType,
+    ) -> ScriptBuf {
+        let sighash_cache = SighashCache::new(tx);
+
+        let sighash = sighash_cache
+            .legacy_signature_hash(input_index, &p2sh_signer.script, sighash_type.to_u32())
+            .unwrap();
+
+        let p2sh_signer_new = P2SHKeypair::new(p2sh_signer.network.clone());
+
+        let signature1 = p2sh_signer.sign_ecdsa_legacy(sighash, sighash_type);
+        let signature2 = p2sh_signer_new.sign_ecdsa_legacy(sighash, sighash_type);
+        println!("sig1: {}, sig2: {}", signature1.to_hex_string(bitcoin::hex::Case::Upper), signature2.to_hex_string(bitcoin::hex::Case::Upper));
+
+
+        Builder::new()
+            .push_slice(&convert_from(signature1))
+            // .push_opcode(OP_DUP)
+            .push_slice(&convert_from(signature2))
+            .push_slice(convert_from(p2sh_signer_new.public.to_bytes()))
+            .push_opcode(OP_CHECKSIG)
             .push_slice(convert_from(p2sh_signer.script.clone().into()))
             .into_script()
     }
@@ -858,6 +890,102 @@ mod test {
         // using utxo_a and utxo_c(it is expected to be utxo_b)
         temp_target_tx.input[0].previous_output = utxo_a.outpoint;
         temp_target_tx.input[1].previous_output = utxo_c.outpoint;
+
+        // it works! we can use utxo_c instead of utxo_b, but utxo_c is an non-standard tx.
+        client.send_transaction(&temp_target_tx).unwrap();
+    }
+
+    #[test]
+    pub fn test_improved_case_of_p2sh() {
+        let network = Network::Regtest;
+        let params = Params::default();
+        let url = format!("{}:18443", local_ip().expect("find one").to_string());
+        let user = "admin".to_string();
+        let password = "admin".to_string();
+
+        let client = RPCClient::new(&url, &user, &password);
+
+        // refer to this case: https://delvingbitcoin.org/t/how-ctv-csfs-improves-bitvm-bridges/1591/8
+        let utxo_b_key = P2SHKeypair::new(network);
+        let utxo_b = client.prepare_utxo_for_address(params.depoist_amt, &utxo_b_key.p2sh_address);
+
+        let temp_signer = SignerInfo::new(network);
+        let temp_utxo = client.prepare_utxo_for_address(params.depoist_amt + params.depoist_amt, &temp_signer.address);
+        let utxo_c_script = Builder::new()
+            .push_opcode(OP_2DROP)
+            .push_opcode(OP_TRUE)
+            .into_script();
+        let mut utxo_c_tx = create_btc_tx(
+            &vec![temp_utxo.clone()],
+            vec![(utxo_c_script, params.depoist_amt - params.gas_amt), (temp_signer.address.script_pubkey(), params.depoist_amt)],
+        );
+        let witness = TransactionGraph::calc_p2wpkh_witness(
+            temp_utxo.amount,
+            &utxo_c_tx,
+            0,
+            &temp_signer,
+            EcdsaSighashType::All,
+        );
+        utxo_c_tx.input[0].witness = witness;
+        let utxo_c_txid = client.send_transaction(&utxo_c_tx).unwrap();
+        let utxo_c = UTXO {
+            outpoint: OutPoint {
+                txid: utxo_c_txid,
+                vout: 0,
+            },
+            amount: utxo_c_tx.output[0].value,
+        };
+
+        let ins = vec![dummy_utxo(Amount::ZERO), utxo_b.clone()];
+        let outs = vec![
+            (
+                utxo_b_key.p2wsh_address.script_pubkey(),
+                params.depoist_amt - params.gas_amt - params.gas_amt - params.gas_amt,
+            ),
+            (
+                utxo_b_key.p2wsh_address.script_pubkey(),
+                params.depoist_amt,
+            ),
+        ];
+        let mut temp_target_tx = create_btc_tx(&ins, outs);
+        // use a new way to unlock the utxo_b
+        let unlocking_script_sig = TransactionGraph::get_improved_p2sh_tx_signature(
+            &temp_target_tx,
+            &utxo_b_key,
+            1,
+            EcdsaSighashType::SinglePlusAnyoneCanPay,
+        );
+        temp_target_tx.input[1].script_sig = unlocking_script_sig;
+        let ctv_hash = temp_target_tx.template_hash(0).unwrap();
+        let ctv_locking_script = calc_locking_script(ctv_hash).unwrap();
+
+        let temp_signer = SignerInfo::new(network);
+        let temp_utxo = client.prepare_utxo_for_address(params.depoist_amt, &temp_signer.address);
+
+        let mut utxo_a_tx = create_btc_tx(
+            &vec![temp_utxo.clone()],
+            vec![(ctv_locking_script, params.depoist_amt - params.gas_amt)],
+        );
+        let witness = TransactionGraph::calc_p2wpkh_witness(
+            temp_utxo.amount,
+            &utxo_a_tx,
+            0,
+            &temp_signer,
+            EcdsaSighashType::All,
+        );
+        utxo_a_tx.input[0].witness = witness;
+        let utxo_a_txid = client.send_transaction(&utxo_a_tx).unwrap();
+        let utxo_a = UTXO {
+            outpoint: OutPoint {
+                txid: utxo_a_txid,
+                vout: 0,
+            },
+            amount: utxo_a_tx.output[0].value,
+        };
+
+        // using utxo_a and utxo_c(it is expected to be utxo_b)
+        temp_target_tx.input[0].previous_output = utxo_a.outpoint;
+        temp_target_tx.input[1].previous_output = utxo_b.outpoint;
 
         // it works! we can use utxo_c instead of utxo_b, but utxo_c is an non-standard tx.
         client.send_transaction(&temp_target_tx).unwrap();
