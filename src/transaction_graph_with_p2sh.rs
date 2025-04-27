@@ -1,9 +1,14 @@
 use bitcoin::consensus::serde::hex::Upper;
 use bitcoin::hex::DisplayHex;
-use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DUP};
+use bitcoin::opcodes::all::{
+    OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_CODESEPARATOR, OP_DEPTH, OP_DUP, OP_EQUALVERIFY, OP_NOP,
+    OP_PUSHNUM_1,
+};
+use bitcoin::opcodes::OP_TRUE;
 use bitcoincore_rpc::bitcoin::transaction;
 use ctvlib::{Error, TemplateHash};
 use lazy_static::lazy_static;
+use serde_json::from_slice;
 use std::ops::Add;
 use std::str::FromStr;
 
@@ -19,7 +24,7 @@ use bitcoin::{
     opcodes::all::OP_NOP4, script::PushBytesBuf, transaction::Version, Amount, ScriptBuf,
     Transaction, TxOut,
 };
-use bitcoin::{Network, OutPoint, TxIn, Txid, Witness};
+use bitcoin::{Network, OutPoint, Script, TxIn, Txid, Witness};
 use secp256k1::{rand, SECP256K1};
 
 use crate::bitcoin_sdk::UTXO;
@@ -68,33 +73,94 @@ impl TransactionGraph {
     }
 
     // refer to https://delvingbitcoin.org/t/how-ctv-csfs-improves-bitvm-bridges/1591/8
-    pub fn get_improved_p2sh_tx_signature(
+    pub fn get_improved_legacy_code_seperator_signature(
         tx: &Transaction,
         p2sh_signer: &P2SHKeypair,
+        script_pubkey: &Script,
         input_index: usize,
         sighash_type: EcdsaSighashType,
     ) -> ScriptBuf {
         let sighash_cache = SighashCache::new(tx);
 
         let sighash = sighash_cache
-            .legacy_signature_hash(input_index, &p2sh_signer.script, sighash_type.to_u32())
+            .legacy_signature_hash(input_index, &script_pubkey, sighash_type.to_u32())
             .unwrap();
 
-        let p2sh_signer_new = P2SHKeypair::new(p2sh_signer.network.clone());
-
+        println!(
+            "script pubkey: {}, pubkey: {}",
+            script_pubkey,
+            p2sh_signer.public.to_string()
+        );
         let signature1 = p2sh_signer.sign_ecdsa_legacy(sighash, sighash_type);
-        let signature2 = p2sh_signer_new.sign_ecdsa_legacy(sighash, sighash_type);
-        println!("sig1: {}, sig2: {}", signature1.to_hex_string(bitcoin::hex::Case::Upper), signature2.to_hex_string(bitcoin::hex::Case::Upper));
-
+        println!(
+            "sig1: {}",
+            signature1.to_hex_string(bitcoin::hex::Case::Upper),
+        );
 
         Builder::new()
-            .push_slice(&convert_from(signature1))
-            // .push_opcode(OP_DUP)
-            .push_slice(&convert_from(signature2))
-            .push_slice(convert_from(p2sh_signer_new.public.to_bytes()))
-            .push_opcode(OP_CHECKSIG)
-            .push_slice(convert_from(p2sh_signer.script.clone().into()))
+            .push_opcode(OP_TRUE)
+            .push_slice(convert_from(signature1))
+            .push_opcode(OP_DUP)
+            .push_opcode(OP_CODESEPARATOR)
+            .push_slice(convert_from(p2sh_signer.public.to_bytes()))
+            .push_opcode(OP_CHECKSIGVERIFY)
             .into_script()
+    }
+
+    // [WIP] refer to https://delvingbitcoin.org/t/how-ctv-csfs-improves-bitvm-bridges/1591/8
+    // maybe the way to calculate signature is different?
+    pub fn get_improved_legacy_nop_signature(
+        tx: &Transaction,
+        p2sh_signer: &P2SHKeypair,
+        script_pubkey: &Script,
+        input_index: usize,
+        sighash_type: EcdsaSighashType,
+    ) -> ScriptBuf {
+        let sighash_cache = SighashCache::new(tx);
+        // signature for script_pubkey
+        let sighash2 = sighash_cache
+            .legacy_signature_hash(input_index, &script_pubkey, sighash_type.to_u32())
+            .unwrap();
+
+        let signature2 = p2sh_signer.sign_ecdsa_legacy(sighash2, sighash_type);
+        let mut builder = Builder::new()
+            // signature1 is ignored
+            .push_opcode(OP_DEPTH)
+            .push_int(1)
+            .push_opcode(OP_EQUALVERIFY)
+            .push_slice(convert_from(p2sh_signer.public.to_bytes()))
+            .push_opcode(OP_CHECKSIGVERIFY)
+            .push_opcode(OP_TRUE)
+            .push_slice(convert_from(signature2.clone()));
+        for _ in 0..197 {
+            builder = builder.push_opcode(OP_NOP)
+        }
+        let new_script_pubkey = builder.into_script();
+        println!(
+            "script pubkey: {}, pubkey: {}",
+            new_script_pubkey,
+            p2sh_signer.public.to_string()
+        );
+        // signature for script_sig
+        let sighash1 = sighash_cache
+            .legacy_signature_hash(input_index, &new_script_pubkey, sighash_type.to_u32())
+            .unwrap();
+
+        let signature1 = p2sh_signer.sign_ecdsa_legacy(sighash1, sighash_type);
+
+        println!(
+            "sig1: {}, sig2: {} ",
+            signature1.to_hex_string(bitcoin::hex::Case::Upper),
+            signature2.to_hex_string(bitcoin::hex::Case::Upper),
+        );
+
+        // add signatrue1
+        let mut temp_script = Builder::new()
+            .push_slice(convert_from(signature1))
+            .into_bytes();
+        temp_script.extend_from_slice(&new_script_pubkey.into_bytes());
+
+        Builder::from(temp_script).into_script()
     }
 
     // only need to add fund outpoint
@@ -130,7 +196,7 @@ impl TransactionGraph {
                 &tx,
                 p2sh_signer,
                 idx + 1,
-                EcdsaSighashType::SinglePlusAnyoneCanPay,
+                EcdsaSighashType::AllPlusAnyoneCanPay,
             );
         }
 
@@ -239,7 +305,7 @@ impl TransactionGraph {
             &challenge,
             &temp_key,
             0,
-            EcdsaSighashType::SinglePlusAnyoneCanPay,
+            EcdsaSighashType::AllPlusAnyoneCanPay,
         );
         challenge.input[0].script_sig = challenge_script_sig;
 
@@ -300,7 +366,7 @@ impl TransactionGraph {
             &disprove,
             &temp_key,
             0,
-            EcdsaSighashType::SinglePlusAnyoneCanPay,
+            EcdsaSighashType::AllPlusAnyoneCanPay,
         );
 
         disprove.input[0].script_sig = disprove_script_sig;
@@ -476,7 +542,7 @@ mod test {
         hex::DisplayHex,
         key,
         opcodes::{
-            all::{OP_2DROP, OP_CHECKSIG},
+            all::{OP_2DROP, OP_CHECKSIG, OP_CHECKSIGVERIFY},
             OP_0, OP_TRUE,
         },
         script::Builder,
@@ -691,13 +757,13 @@ mod test {
             &happy_take,
             &p2sh_signer,
             0,
-            bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
+            bitcoin::EcdsaSighashType::AllPlusAnyoneCanPay,
         );
         let unlocking_script1 = TransactionGraph::get_p2sh_tx_signature(
             &happy_take,
             &p2sh_signer,
             1,
-            bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
+            bitcoin::EcdsaSighashType::AllPlusAnyoneCanPay,
         );
         println!(
             "script_pubkey: {}",
@@ -815,14 +881,20 @@ mod test {
         let utxo_b = client.prepare_utxo_for_address(params.depoist_amt, &utxo_b_key.p2sh_address);
 
         let temp_signer = SignerInfo::new(network);
-        let temp_utxo = client.prepare_utxo_for_address(params.depoist_amt + params.depoist_amt, &temp_signer.address);
+        let temp_utxo = client.prepare_utxo_for_address(
+            params.depoist_amt + params.depoist_amt,
+            &temp_signer.address,
+        );
         let utxo_c_script = Builder::new()
             .push_opcode(OP_2DROP)
             .push_opcode(OP_TRUE)
             .into_script();
         let mut utxo_c_tx = create_btc_tx(
             &vec![temp_utxo.clone()],
-            vec![(utxo_c_script, params.depoist_amt - params.gas_amt), (temp_signer.address.script_pubkey(), params.depoist_amt)],
+            vec![
+                (utxo_c_script, params.depoist_amt - params.gas_amt),
+                (temp_signer.address.script_pubkey(), params.depoist_amt),
+            ],
         );
         let witness = TransactionGraph::calc_p2wpkh_witness(
             temp_utxo.amount,
@@ -847,17 +919,14 @@ mod test {
                 utxo_b_key.p2wsh_address.script_pubkey(),
                 params.depoist_amt - params.gas_amt - params.gas_amt - params.gas_amt,
             ),
-            (
-                utxo_b_key.p2wsh_address.script_pubkey(),
-                params.depoist_amt,
-            ),
+            (utxo_b_key.p2wsh_address.script_pubkey(), params.depoist_amt),
         ];
         let mut temp_target_tx = create_btc_tx(&ins, outs);
         let unlocking_script_sig = TransactionGraph::get_p2sh_tx_signature(
             &temp_target_tx,
             &utxo_b_key,
             1,
-            EcdsaSighashType::SinglePlusAnyoneCanPay,
+            EcdsaSighashType::AllPlusAnyoneCanPay,
         );
         temp_target_tx.input[1].script_sig = unlocking_script_sig;
         let ctv_hash = temp_target_tx.template_hash(0).unwrap();
@@ -904,90 +973,148 @@ mod test {
         let password = "admin".to_string();
 
         let client = RPCClient::new(&url, &user, &password);
+        const CODESEPARATOR: &str = "CODESEPARATOR";
+        const NOP: &str = "NOP";
+        const DROP: &str = "DROP";
 
-        // refer to this case: https://delvingbitcoin.org/t/how-ctv-csfs-improves-bitvm-bridges/1591/8
-        let utxo_b_key = P2SHKeypair::new(network);
-        let utxo_b = client.prepare_utxo_for_address(params.depoist_amt, &utxo_b_key.p2sh_address);
+        let cases = [CODESEPARATOR, NOP, DROP];
+        for case in cases {
+            println!("case: {}", case);
+            // refer to this case: https://delvingbitcoin.org/t/how-ctv-csfs-improves-bitvm-bridges/1591/8
+            let utxo_b_key = P2SHKeypair::new(network);
+            let utxo_b_script = Builder::new()
+                .push_slice(convert_from(utxo_b_key.public.to_bytes()))
+                .push_opcode(OP_CHECKSIGVERIFY)
+                .into_script();
+            let temp_signer = SignerInfo::new(network);
+            let temp_utxo =
+                client.prepare_utxo_for_address(params.depoist_amt, &temp_signer.address);
+            let mut utxo_b_tx = create_btc_tx(
+                &vec![temp_utxo.clone()],
+                vec![(utxo_b_script.clone(), params.depoist_amt - params.gas_amt)],
+            );
+            let witness = TransactionGraph::calc_p2wpkh_witness(
+                temp_utxo.amount,
+                &utxo_b_tx,
+                0,
+                &temp_signer,
+                EcdsaSighashType::All,
+            );
+            utxo_b_tx.input[0].witness = witness;
+            let utxo_b_txid = client.send_transaction(&utxo_b_tx).unwrap();
+            let utxo_b = UTXO {
+                outpoint: OutPoint {
+                    txid: utxo_b_txid,
+                    vout: 0,
+                },
+                amount: utxo_b_tx.output[0].value,
+            };
 
-        let temp_signer = SignerInfo::new(network);
-        let temp_utxo = client.prepare_utxo_for_address(params.depoist_amt + params.depoist_amt, &temp_signer.address);
-        let utxo_c_script = Builder::new()
-            .push_opcode(OP_2DROP)
-            .push_opcode(OP_TRUE)
-            .into_script();
-        let mut utxo_c_tx = create_btc_tx(
-            &vec![temp_utxo.clone()],
-            vec![(utxo_c_script, params.depoist_amt - params.gas_amt), (temp_signer.address.script_pubkey(), params.depoist_amt)],
-        );
-        let witness = TransactionGraph::calc_p2wpkh_witness(
-            temp_utxo.amount,
-            &utxo_c_tx,
-            0,
-            &temp_signer,
-            EcdsaSighashType::All,
-        );
-        utxo_c_tx.input[0].witness = witness;
-        let utxo_c_txid = client.send_transaction(&utxo_c_tx).unwrap();
-        let utxo_c = UTXO {
-            outpoint: OutPoint {
-                txid: utxo_c_txid,
-                vout: 0,
-            },
-            amount: utxo_c_tx.output[0].value,
-        };
+            let temp_signer = SignerInfo::new(network);
+            let temp_utxo = client.prepare_utxo_for_address(
+                params.depoist_amt + params.depoist_amt,
+                &temp_signer.address,
+            );
+            let utxo_c_script = Builder::new()
+                .push_opcode(OP_2DROP)
+                .push_opcode(OP_TRUE)
+                .into_script();
+            let mut utxo_c_tx = create_btc_tx(
+                &vec![temp_utxo.clone()],
+                vec![
+                    (utxo_c_script, params.depoist_amt - params.gas_amt),
+                    (temp_signer.address.script_pubkey(), params.depoist_amt),
+                ],
+            );
+            let witness = TransactionGraph::calc_p2wpkh_witness(
+                temp_utxo.amount,
+                &utxo_c_tx,
+                0,
+                &temp_signer,
+                EcdsaSighashType::All,
+            );
+            utxo_c_tx.input[0].witness = witness;
+            let utxo_c_txid = client.send_transaction(&utxo_c_tx).unwrap();
+            let utxo_c = UTXO {
+                outpoint: OutPoint {
+                    txid: utxo_c_txid,
+                    vout: 0,
+                },
+                amount: utxo_c_tx.output[0].value,
+            };
 
-        let ins = vec![dummy_utxo(Amount::ZERO), utxo_b.clone()];
-        let outs = vec![
-            (
-                utxo_b_key.p2wsh_address.script_pubkey(),
-                params.depoist_amt - params.gas_amt - params.gas_amt - params.gas_amt,
-            ),
-            (
-                utxo_b_key.p2wsh_address.script_pubkey(),
-                params.depoist_amt,
-            ),
-        ];
-        let mut temp_target_tx = create_btc_tx(&ins, outs);
-        // use a new way to unlock the utxo_b
-        let unlocking_script_sig = TransactionGraph::get_improved_p2sh_tx_signature(
-            &temp_target_tx,
-            &utxo_b_key,
-            1,
-            EcdsaSighashType::SinglePlusAnyoneCanPay,
-        );
-        temp_target_tx.input[1].script_sig = unlocking_script_sig;
-        let ctv_hash = temp_target_tx.template_hash(0).unwrap();
-        let ctv_locking_script = calc_locking_script(ctv_hash).unwrap();
+            let ins = vec![dummy_utxo(Amount::ZERO), utxo_b.clone()];
+            let outs = vec![
+                (
+                    utxo_b_key.p2wsh_address.script_pubkey(),
+                    params.depoist_amt - params.gas_amt - params.gas_amt - params.gas_amt,
+                ),
+                (utxo_b_key.p2wsh_address.script_pubkey(), params.depoist_amt),
+            ];
+            let mut temp_target_tx = create_btc_tx(&ins, outs);
+            // use a new way to unlock the utxo_b
+            let unlocking_script_sig = if case != NOP {
+                TransactionGraph::get_improved_legacy_code_seperator_signature(
+                    &temp_target_tx,
+                    &utxo_b_key,
+                    &utxo_b_script,
+                    1,
+                    EcdsaSighashType::AllPlusAnyoneCanPay,
+                )
+            } else {
+                TransactionGraph::get_improved_legacy_nop_signature(
+                    &temp_target_tx,
+                    &utxo_b_key,
+                    &utxo_b_script,
+                    1,
+                    EcdsaSighashType::AllPlusAnyoneCanPay,
+                )
+            };
+            temp_target_tx.input[1].script_sig = unlocking_script_sig;
+            let ctv_hash = temp_target_tx.template_hash(0).unwrap();
+            let ctv_locking_script = calc_locking_script(ctv_hash).unwrap();
+            let temp_signer = SignerInfo::new(network);
+            let temp_utxo =
+                client.prepare_utxo_for_address(params.depoist_amt, &temp_signer.address);
 
-        let temp_signer = SignerInfo::new(network);
-        let temp_utxo = client.prepare_utxo_for_address(params.depoist_amt, &temp_signer.address);
+            let mut utxo_a_tx = create_btc_tx(
+                &vec![temp_utxo.clone()],
+                vec![(ctv_locking_script, params.depoist_amt - params.gas_amt)],
+            );
+            let witness = TransactionGraph::calc_p2wpkh_witness(
+                temp_utxo.amount,
+                &utxo_a_tx,
+                0,
+                &temp_signer,
+                EcdsaSighashType::All,
+            );
+            utxo_a_tx.input[0].witness = witness;
+            let utxo_a_txid = client.send_transaction(&utxo_a_tx).unwrap();
+            let utxo_a = UTXO {
+                outpoint: OutPoint {
+                    txid: utxo_a_txid,
+                    vout: 0,
+                },
+                amount: utxo_a_tx.output[0].value,
+            };
 
-        let mut utxo_a_tx = create_btc_tx(
-            &vec![temp_utxo.clone()],
-            vec![(ctv_locking_script, params.depoist_amt - params.gas_amt)],
-        );
-        let witness = TransactionGraph::calc_p2wpkh_witness(
-            temp_utxo.amount,
-            &utxo_a_tx,
-            0,
-            &temp_signer,
-            EcdsaSighashType::All,
-        );
-        utxo_a_tx.input[0].witness = witness;
-        let utxo_a_txid = client.send_transaction(&utxo_a_tx).unwrap();
-        let utxo_a = UTXO {
-            outpoint: OutPoint {
-                txid: utxo_a_txid,
-                vout: 0,
-            },
-            amount: utxo_a_tx.output[0].value,
-        };
+            // using utxo_a and utxo_c(it is expected to be utxo_b)
+            temp_target_tx.input[0].previous_output = utxo_a.outpoint;
+            temp_target_tx.input[1].previous_output = if case == DROP {
+                utxo_c.outpoint
+            } else {
+                utxo_b.outpoint
+            };
 
-        // using utxo_a and utxo_c(it is expected to be utxo_b)
-        temp_target_tx.input[0].previous_output = utxo_a.outpoint;
-        temp_target_tx.input[1].previous_output = utxo_b.outpoint;
-
-        // it works! we can use utxo_c instead of utxo_b, but utxo_c is an non-standard tx.
-        client.send_transaction(&temp_target_tx).unwrap();
+            let res = client.send_transaction(&temp_target_tx);
+            // it works! we can use utxo_c instead of utxo_b, but utxo_c is an non-standard tx.
+            if case == DROP {
+                println!("failed");
+                assert!(res.is_err());
+            } else {
+                println!("successful");
+                assert!(res.is_ok());
+            }
+        }
     }
 }
